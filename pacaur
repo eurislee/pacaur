@@ -1,0 +1,538 @@
+#!/bin/bash
+
+# debug
+set -xv
+
+# name
+name=${0##*/}
+
+# error messages
+die(){ >&2 printf "%s: %b \n" "${name^}" "$@" ; exit 2 ;}
+
+# 
+g_er(){ echo -e "${Bold}${Green}==>${Reset} $@ " ${Reset} ;}
+b_er(){ echo -e "${Bold}  ${Blue}-->${Reset} $@ ${Reset}" ;}
+r_er(){ echo -e "${Bold}${Red}==> ERROR:${Reset} $@ " ; exit 1 ;}
+
+# colors
+ Reset=$(tput sgr0)     # Text Reset
+# Regular Colors
+ Black=$(tput setaf 0)  # Black
+   Red=$(tput setaf 1)  # Red
+ Green=$(tput setaf 2)  # Green
+Yellow=$(tput setaf 3)  # Yellow
+  Blue=$(tput setaf 4)  # Blue
+Purple=$(tput setaf 5)  # Purple
+  Cyan=$(tput setaf 6)  # Cyan
+ White=$(tput setaf 7)  # White
+  Bold=$(tput bold)     # Bold
+
+# convert html amp chars to text
+_amp_(){
+local _amp_char_=( "&quot;" "&amp;" "&#039;" "&lt;" "&gt;" )
+local _nor_char_=( '"' '&' "'" '<' '>' )
+local _file_="$1"
+for i in ${!_amp_char_[@]} ;{ sed -i "s/${_amp_char_[$i]}/\\${_nor_char_[$i]}/g" "$_file_" ;}
+}
+
+# get list of resoult in nice format
+_list_(){
+# clean search list
+[ "$_PACAUR_SEARCH_" ] || :> "$_CACHE_SEARCH_"
+
+# get list of search result (try to find a way better then use awk)
+awk '/<td><a href="\/packages\//{
+	gsub(/<[^>]*>/,"",$0)
+	gsub(/^[[:space:]]*/,"",$0)
+	printf "%s", $0
+	for(i=0;i<4;i++){
+		getline
+		gsub(/<[^>]*>/,"",$0)
+		gsub(/^[[:space:]]*/," ",$0)
+		printf "%s", $0
+	}
+	print ""
+}' "$_CACHE_SOURCE_" > "$_CACHE_SEARCH_"
+}
+
+# get packages number and page
+_packages_(){
+awk '/^[[:space:]]*<div class="pkglist-stats">/,/<\/div>/{
+    if($2 == "packages"){
+        for(i=1;i<=7;i++){ printf "%s ", $i }
+    }
+}' "$_CACHE_SOURCE_"
+}
+
+# download source page web
+_source_(){
+#if no package giving
+[ "$1" ] || [ "$_PAGE_" ] || r_er "Empty box, what should i do with it"
+
+# simple wait message
+g_er "Retrieving sources ..."
+
+# get package name
+local _pkg_=${1// /+}
+
+# get search by string
+local _link_=$(_search_by_ "$_pkg_")
+
+# get items per page
+[ "$_PACAUR_PER_" ] && {
+    b_er "Count Item List ..."
+    (( _PACAUR_PER_ )) 2> /dev/null && _per_="&PP=${_PACAUR_PER_}" || r_er "Unvalide Number for -p Option"
+}
+
+# Download the source page
+if curl -s "https://aur.archlinux.org/packages/${_PAGE_:=${_link_}}${_per_}" -o "$_CACHE_SOURCE_"; then
+    b_er "Generate search link ..."
+    _amp_ "$_CACHE_SOURCE_"
+	_list_
+    [ "$_PACAUR_SEARCH_" ] && {
+        while [ "$_PAGE_" ]; do
+            _PAGE_=$(awk -F '"' '/^[[:space:]]*<div class="pkglist-stats">/,/<\/div>/{if($0 ~ "Next"){print $4}}' $_CACHE_SOURCE_)
+            _PAGE_=${_PAGE_##*/}
+            curl -s "https://aur.archlinux.org/packages/${_PAGE_}" -o "$_CACHE_SOURCE_"
+            _list_
+        done
+    }
+else
+	die "First of all, do You Have Network?"
+fi
+
+# if the _CACHE_SEARCH_ file is empty that mean there is no result found
+[ "$(< $_CACHE_SEARCH_)" ] || r_er "$_pkg_ ?!!. Did You type the name correct"
+}
+
+# search by
+_search_by_(){
+local _opt_=${_PACAUR_BY_}
+local _pkg_=${1}
+
+[ "$_opt_" ] || { echo -e "?O=0&K=${_pkg_}" && return 0 ;}
+
+case "${_opt_^^}" in
+    ND )
+        local _link="?O=0&K=${_pkg_}"
+        ;;
+    NO )
+        local _link="?O=0&SeB=n&K=${_pkg_}"
+        ;;
+    PB )
+        local _link="?O=0&SeB=b&K=${_pkg_}"
+        ;;
+    EN )
+        local _link="?O=0&SeB=N&K=${_pkg_}"
+        ;;
+    EP )
+        local _link="?O=0&SeB=B&K=${_pkg_}"
+        ;;
+    K )
+        local _link="?O=0&SeB=k&K=${_pkg_}"
+        ;;
+    M )
+        local _link="?O=0&SeB=m&K=${_pkg_}"
+        ;;
+    CM )
+        local _link="?O=0&SeB=c&K=${_pkg_}"
+        ;;
+    MC )
+        local _link="?O=0&SeB=M&K=${_pkg_}"
+        ;;
+    S )
+        local _link="?O=0&SeB=s&K=${_pkg_}"
+        ;;
+    * )
+        r_er "Im lost, is that '$_opt_' what you looking for again ?!"
+        ;;
+esac
+
+[ "$_link" ] && printf "%s\n" "$_link"
+}
+
+# check if pkg already installed
+_check_pkg_(){
+local _PKG_="$1"
+local Q
+
+# just check if the package already installed
+while read -r Q; do
+	[ "$Q" = "$_PKG_" ] && echo -e "${Green}[Installed]${Reset}"
+done< <(pacman -Qqm 2> /dev/null)
+}
+
+# show result
+_resoult_(){
+while read -ra LINE ; do
+	_LIST_PKG_+=( "${LINE[0]}" ) # create list of packages
+	((_COUNT_++)) # create menu count
+
+	# create menu items
+	[ "$_PACAUR_SEARCH_" ] || printf "%0.3d " $_COUNT_
+    echo -e "${Bold}${Blue}Aur${White}/${LINE[0]} ${Yellow}${LINE[1]} ${Cyan}(${LINE[2]} ${LINE[3]}%) $(_check_pkg_ ${LINE[0]}) ${Reset}"
+	echo -e "    ${LINE[@]:4}"
+done < "$_CACHE_SEARCH_"
+
+[ "$_PACAUR_SEARCH_" ] || g_er "$(_packages_) ${Yellow}[N/p] page"
+}
+
+# read selection
+_selection_(){
+# create a loop if you give uncorrect input
+while true; do
+	_resoult_
+	g_er "Package to Install (ex : 1 2 3 ),${Red} [q/Q]uit"
+	echo -en "${Blue}  --> ${Reset}"
+    read _SELECT_
+
+	# check for quit option
+	[[ "$_SELECT_" =~ (q|Q) ]] && exit 0
+	# if you press enter
+	[ "$_SELECT_" ] || exit 0
+
+    # next and prev page
+    case "$_SELECT_" in
+        [Nn] )
+            _PAGE_=$(awk -F '"' '/^[[:space:]]*<div class="pkglist-stats">/,/<\/div>/{if($0 ~ "Next"){print $4}}' $_CACHE_SOURCE_)
+            ;;
+        [Pp] )
+            _PAGE_=$(awk -F '"' '/^[[:space:]]*<div class="pkglist-stats">/,/<\/div>/{if($0 ~ "Previous"){print $4}}' $_CACHE_SOURCE_)
+            ;;
+    esac
+    _PAGE_=${_PAGE_##*/}
+    [ "$_PAGE_" ] && { _source_ ; continue; }
+
+    for i in ${_SELECT_} ; do
+        (( i )) 2> /dev/null || die "What a Lettre doing in the Selection ??"
+
+        (( i <= 0 || i > _COUNT_ )) && die "Just like McDonald's, Pick what's in the menu"
+
+        _PACAUR_SELECT_=true
+    done
+
+    [ "$_PACAUR_SELECT_" ] && break
+done
+}
+
+# download pkgbuild from aur
+_pkgbuild_(){
+[ "$_PACAUR_DOWNLOAD_" ] && _CACHE_DOWNLOAD_="$PWD" || _CACHE_DOWNLOAD_="$_CACHE_/packages"
+
+_SELECT_=( ${_SELECT_:-${@}} )
+
+# create loop for pkgs
+for i in ${_SELECT_[@]} ; do
+    [ "$_PACAUR_SELECT_" ] && {
+        ((i--))
+        local _PKG_="${_LIST_PKG_[$i]}"
+    } || {
+        local _PKG_="$i"
+    }
+
+	# just simple msg
+    g_er "Retrieving ${_PKG_} Snapshot."
+	b_er "Downloading ${_PKG_}.tar.gz ..."
+
+    # check for _CACHE_DOWNLOAD_
+    [ -d "$_CACHE_DOWNLOAD_" ] || mkdir -p "$_CACHE_DOWNLOAD_"
+
+	# download PKGBUILD file
+	if curl -s "https://aur.archlinux.org/cgit/aur.git/snapshot/$_PKG_.tar.gz" -o "$_CACHE_DOWNLOAD_/$_PKG_.tar.gz" ; then
+        # check if the file is a zip or regular file
+        local _type_=$(file -Lb --mime-type "$_CACHE_DOWNLOAD_/$_PKG_.tar.gz")
+
+        [ "${_type_##*/}" = "gzip" ] || {
+            rm "$_CACHE_DOWNLOAD_/$_PKG_.tar.gz"
+            r_er "$_PKG_?!, what you talking about ??"
+            continue
+        }
+
+        # exit if you pick -d
+        [ "$_PACAUR_DOWNLOAD_" ] && { b_er "$_PKG_ Just stay here, don't do anything"; continue ;}
+
+        g_er "Extracting Sources ..."
+        b_er "Extracting $_PKG_.tar.gz"
+        # unpack the package
+        eval "${TAR_CMD} ${TAR_FLG} $_CACHE_DOWNLOAD_/$_PKG_.tar.gz -C $_CACHE_DOWNLOAD_"
+
+		# go to pkg dir
+		cd "$_CACHE_DOWNLOAD_/$_PKG_"
+
+		# if u use -e edit PKGBUILD
+		[ "$_PACAUR_EDIT_" ] && {
+            eval "${PACAUR_EDITOR} PKGBUILD"
+            g_er "Edit PKGBUILD file ..."
+        }
+
+        # -c option
+        [ "$_PACAUR_COMPILE_" ] && {
+            g_er "Compile $_PKG_ Package ..."
+            eval "${MAKEPKG_CMD} ${MAKEPKG_COM_FLG}"
+            cp "$_CACHE_DOWNLOAD_/$_PKG_" "$PWD"
+        } || {
+            g_er "Compile/Install $_PKG_ Package ..."
+            eval "${MAKEPKG_CMD} ${MAKEPKG_INS_FLG}"
+        }
+
+		# back where we were
+		cd "$OLDPWD"
+
+        # remove cache
+        [ "$_PACAUR_KEEP_" ] && b_er "Keep $_PKG_ in cache ..." || rm -rf "$_CACHE_DOWNLOAD_/$_PKG_"
+
+        # copy compile file to download
+        [ "$_PACAUR_COMPILE_" ] && { cp -Rf "$_CACHE_DOWNLOAD_/$_PKG_" "$PWD" && b_er "Move $_PKG_ in current Directory" ;}
+	else
+		die "First of all, do You Have Network?"
+	fi
+done
+}
+
+# package update
+_update_(){
+local _CACHE_UPDATE_="$_CACHE_/update"
+local up _pkg_version_
+
+g_er "Check for Packages Update"
+while read -u3 -ra up ; do
+	local _pkg_=${up[0]}
+	local _version_=${up[1]}
+
+    b_er "check for $_pkg_ New version ..."
+    if (curl -s "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$_pkg_" -o "$_CACHE_UPDATE_"); then
+        read -r _pkg_version_ < <(awk -F = '{if($1 == "pkgver"){ver=$2}; if($1 == "pkgrel"){rel=$2}}END{ printf "%s-%s\n", ver, rel}' "$_CACHE_UPDATE_")
+
+        [ "$_version_" != "$_pkg_version_" ] && _update_list_+=( "$_pkg_" )
+    else
+	    die "First of all, do You Have Network?"
+    fi
+
+    [ "${_update_list_[*]}" ] && {
+        g_er "There is (${#_update_list_[@]}) Rusty Packages here, do you want to Update them ${Blue}[Y/n]"
+        read -N1 -p "${Blue}${Bold}  --> ${Reset}" Y_N
+        [[ "$Y_N" =~ [Yy] ]] && _pkgbuild_ "${_update_list_[@]}"
+    }||{
+        g_er "All is up to date"
+    }
+
+done 3< <(pacman -Qm $_pkg_)
+}
+
+# remove packages
+_remove_(){
+    sudo pacman -Rsn ${_PACAUR_REMOVE_[@]}
+}
+
+# get pkg info
+_info_(){
+local PKG=${1}
+local _CACHE_INFO_="$_CACHE_/info"
+
+# just waiting msg
+g_er "Download ${PKG} Info ..."
+
+# Download info web page
+if curl -s "https://aur.archlinux.org/packages/$PKG" -o "$_CACHE_INFO_" ; then
+    # if no resoult found
+    ( grep '404 - Page Not Found' "$_CACHE_INFO_" &> /dev/null ) && r_er "$PKG ?!!. Did You type the name correct"
+
+    # get information
+    _amp_ "$_CACHE_INFO_"
+    awk '/<table id="pkginfo">/,/<\/table>/ {
+        if($2 == "class=\"keyword\""){
+            gsub(/<[^>]*>/,"",$0)
+            printf "%s ", $0
+            line="keyword"
+            next
+        }
+        gsub(/<[^>]*>/,"",$0)
+        gsub(/^[[:space:]]*/,"",$0)
+        if(NF > 0) {
+            if($NF ~ ":$"){
+                if($NF == "Licenses:" && line == "keyword"){
+                    printf "\n%17s ", $0
+                }else{
+                    printf "%17s ", $0
+                }
+            } else {
+                printf "%s\n", $0
+            }
+        }
+    }' "$_CACHE_INFO_"
+else
+    die "First of all, do You Have Network?"
+fi
+}
+
+# clean cache
+_clean_(){
+    local Y_N
+    g_er "The Mide is here, Do you want to clean you cache ?!${Green}[Y/n]"
+    read -N1 -p "${Blue} --> ${Reset}" Y_N
+    [[ "$Y_N" =~ [Y|y] ]] && rm -rf "$_CACHE_"
+}
+
+# help message
+_help_dialog_(){
+while read ; do
+    printf "%b\n" "$REPLY"
+done <<- HELP
+${name^}: Bash Arch User Repository
+AUR Package Manager in Bure Bash
+usage : ${name} [OPTION]... [PACKAGE]...
+[OPTION] Only short option for now
+ -S PKG     Install target PKG
+ -R PKG     Remove target PKG
+ -u         Update all AUR Packages
+ -d PKG     Download PKGBUILD of PKG, nothing else
+ -i PKG     Show information for PKG
+ -s PKG     Search for package by matching PKG
+ -b SRC     Search By Criteria (give -b option before search STRING)
+ -p NUM     Number of Packages Per Page (50,100,250)
+ -m         Make/Compile PKGBUILD of PKG, nothing else
+ -e         Edit PKGBUILD in installation mode
+ -k         Keep Compile folder
+ -c         Clean pacaur Cache
+ -h         Print help usage
+[SRC] for -b option
+ nd         Name, Description (default)
+ no         Name Only
+ pb         Package Base
+ en         Exact Name
+ ep         Exact Package Base
+ k          Keywords
+ m          Maintainer
+ cm         Co-maintainer
+ mc         Maintainer, Co-maintainer
+ s          Submitter
+[VARIABLES] change script commands
+ PACAUR_CACHE        Directory to use for pacaur Cache      (\$HOME/.cache/pacaur)
+ PACAUR_EDITOR       Editor to use when editing PKGBUILDS (\$EDITOR)
+ TAR_CMD           Tar command to use                   (tar)
+ TAR_FLG           Pass arguments to Tar                (xf)
+ MAKEPKG_CMD       Makepkg command to use               (makepkg)
+ MAKEPKG_INS_FLG   Pass arguments to Makepkg install    (-rsif)
+ MAKEPKG_COM_FLG   Pass arguments to Makepkg Compile    (-s)
+Note :
+ * if you choose (-d|-m|-k) the package will be in you Current Directory
+ * Export ${name^^} Varible when you use them
+HELP
+exit 0
+}
+
+# main function
+_main_(){
+while getopts ":S:R:us:i:d:b:p:mcekh" OPT ; do
+	case "$OPT" in
+		S ) # --install
+            _PACAUR_INSTALL_=( "$OPTARG" )
+			_PACAUR_LIST_=true
+            ((_PACAUR_MA_++))
+
+            #Multi package
+            until [[ $(eval "echo \${$OPTIND}") =~ ^-.* ]] || [ ! $(eval "echo \${$OPTIND}") ]; do
+                _PACAUR_INSTALL_+=($(eval "echo \${$OPTIND}"))
+                OPTIND=$((OPTIND + 1))
+            done
+			;;
+        R ) # --remove
+            _PACAUR_REMOVE_=( "$OPTARG" )
+			_PACAUR_LIST_=true
+            ((_PACAUR_MA_++))
+
+            #Multi package
+            until [[ $(eval "echo \${$OPTIND}") =~ ^-.* ]] || [ ! $(eval "echo \${$OPTIND}") ]; do
+                _PACAUR_REMOVE_+=($(eval "echo \${$OPTIND}"))
+                OPTIND=$((OPTIND + 1))
+            done
+            ;;
+		s ) # --search
+			_PACAUR_SEARCH_="$OPTARG"
+			_PACAUR_LIST_=true
+            ((_PACAUR_MA_++))
+			;;
+        u ) # --update
+            _PACAUR_UPDATE_=true
+			_PACAUR_LIST_=true
+            ((_PACAUR_MA_++))
+            ;;
+        i ) # --info
+			_PACAUR_INFO_="$OPTARG"
+			_PACAUR_LIST_=true
+            ((_PACAUR_MA_++))
+            ;;
+		d ) # --Download
+            _PACAUR_DOWNLOAD_=( "$OPTARG" )
+			_PACAUR_LIST_=true
+            ((_PACAUR_MA_++))
+
+            #Multi package
+             until [[ $(eval "echo \${$OPTIND}") =~ ^-.* ]] || [ ! $(eval "echo \${$OPTIND}") ]; do
+                _PACAUR_DOWNLOAD_+=($(eval "echo \${$OPTIND}"))
+                OPTIND=$((OPTIND + 1))
+            done
+			;;
+        b ) # --by
+            _PACAUR_BY_="$OPTARG"
+            ;;
+        p ) # --per
+            _PACAUR_PER_="$OPTARG"
+            ;;
+        m ) # --make
+            _PACAUR_COMPILE_=true
+            ;;
+		e ) # --edit
+			_PACAUR_EDIT_=true
+			;;
+        k ) # --keep
+            _PACAUR_KEEP_=true
+            ;;
+        c ) # --clean
+            _PACAUR_CLEAN_=true
+            _PACAUR_LIST_=true
+            ;;
+		h ) # --help
+			_help_dialog_
+			;;
+        : ) # no arg giving
+            die "You give me nothing to looking for "
+            ;;
+		* ) # wrong option
+			die "What is that (-$OPTARG)?. Did you Read Help dialog (-h)?"
+			;;
+	esac
+done
+shift "$((OPTIND-1))"
+
+_pkg_list_=( "$@" )
+}
+
+# exec main function
+_main_ "$@"
+
+# script variables
+     PACAUR_CACHE=${PACAUR_CACHE:-$HOME/.cache/pacaur}
+        TAR_CMD=${TAR_CMD:-tar}
+        TAR_FLG=${TAR_FLG:-xf}
+    MAKEPKG_CMD=${MAKEPKG_CMD:-makepkg}
+MAKEPKG_INS_FLG=${MAKEPKG_INS_FLG:--rfsi}
+MAKEPKG_COM_FLG=${MAKEPKG_COM_FLG:--s}
+    PACAUR_EDITOR=${PACAUR_EDITOR:-$EDITOR}
+        _CACHE_="$PACAUR_CACHE"
+ _CACHE_SOURCE_="$_CACHE_/source"
+ _CACHE_SEARCH_="$_CACHE_/search"
+
+# create tmp dir
+[ -d "$_CACHE_" ] || mkdir -p "$_CACHE_"
+
+# run selected options
+(( _PACAUR_MA_ = 1 ))     || die "I have only Two Hands can't do many jobs at once (-d,-S,-s,-i,-R)"
+[ "$_PACAUR_INSTALL_" ]   && _pkgbuild_ "${_PACAUR_INSTALL_[@]}"    || true
+[ "$_PACAUR_REMOVE_" ]    && _remove_ "${_PACAUR_REMOVE_[@]}"       || true
+[ "$_PACAUR_UPDATE_" ]    && _update_ "${_pkg_list_[@]}"          || true
+[ "$_PACAUR_DOWNLOAD_" ]  && _pkgbuild_ "${_PACAUR_DOWNLOAD_[@]}"   || true
+[ "$_PACAUR_INFO_" ]      && _info_ "$_PACAUR_INFO_"                || true
+[ "$_PACAUR_CLEAN_" ]     && _clean_                              || true
+[ "$_PACAUR_LIST_" ]      && true || { _source_ "${_pkg_list_[@]}"; _selection_; _pkgbuild_ ;}
+[ "$_PACAUR_SEARCH_" ]    && { _source_ "$_PACAUR_SEARCH_"; _resoult_ ;} || true
