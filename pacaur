@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # debug
-set -xv
+# set -xv
 
 # name
 name=${0##*/}
